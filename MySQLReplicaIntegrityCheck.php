@@ -1,9 +1,9 @@
 #!/usr/bin/php
 <?php
 
-    #
-    #   configuration
-    #
+    ###############################################################################################################################################################################
+    #   Configuration
+    ###############################################################################################################################################################################
     $master_link_host = '127.0.0.1';
     $master_link_user = 'root';
     $master_link_password = '';
@@ -18,86 +18,46 @@
     $slave_config[0]['db'] = 'sample_database';
     
     $chunk_size = 100000; // rows
-    
+    $dummyTableName = "__integrity_check_dummy__";
 	
-    #
-    #	functions
-    #
-    function getmicrotime()
-    { 
+    ###############################################################################################################################################################################
+    #	Functions
+    ###############################################################################################################################################################################
+    function getmicrotime() { 
         list($usec, $sec) = explode(" ",microtime()); 
         return ((float)$usec + (float)$sec); 
     }     
     $time_start = getmicrotime();
     $integrity_result = true;
     $integrity_result_bad_tables = [];
-    
-    
-    #
-    #   connect's
-    #
-    $master_link = mysqli_connect($master_link_host,$master_link_user,$master_link_password,$master_link_db,$master_link_port) or die('Master connection fails.');
-    
-    $slave_links = [];
-    foreach( $slave_config as $k => $slave_config1 )
-    {
-        $slave_links[$k] = mysqli_connect($slave_config1['host'],$slave_config1['user'],$slave_config1['password'],$slave_config1['db'],$slave_config1['port']) or die("Slave #{$k} connection fails.");
-    }
-    
-    
-    #
-    #   create dummy table, for artificial master_log incrementation (it needs to change due to chunk locking process; without it i can't guarantee integrity on chunk checksum checking)
-    #
-    $query = "DROP TABLE IF EXISTS __integrity_check_dummy__;";
-    $result = mysqli_query($master_link, $query);
-    if( mysqli_errno( $master_link ) != 0 )
-    {
-        echo __LINE__ . ' ' . mysqli_error($master_link);
-        exit();
-    }   
-    
-    $query = "CREATE TABLE __integrity_check_dummy__ ( n BIGINT ) SELECT 0 AS n;";
-    $result = mysqli_query($master_link, $query);
-    if( mysqli_errno( $master_link ) != 0 )
-    {
-        echo __LINE__ . ' ' . mysqli_error($master_link);
-        exit();
-    }   
-    
-    
+
     #
     #   function to increment dummy table (and master log pos)
     #
-    function dummy_increment()
-    {
+    function dummy_increment() {
         global $master_link;
         
-        $query = "UPDATE __integrity_check_dummy__ SET n = n + 1";
+        $query = "UPDATE $dummyTableName SET n = n + 1";
         $result = mysqli_query($master_link, $query);
-        if( mysqli_errno( $master_link ) != 0 )
-        {
+        if( mysqli_errno( $master_link ) != 0 ) {
             echo __LINE__ . ' ' . mysqli_error($master_link);
             exit();
         }           
     }
-
     
     #
     #   function to get actual dummy pos on chosen server
     #   used in loop, that waits for slaves to catch up master dummy pos nr
     #
-    function dummy_getn( $link )
-    {
-        $query = "SELECT n FROM __integrity_check_dummy__ LIMIT 1";
+    function dummy_getn( $link ) {
+        $query = "SELECT n FROM $dummyTableName LIMIT 1";
         $result = mysqli_query($link, $query);
-        if( mysqli_errno( $link ) != 0 )
-        {
+        if( mysqli_errno( $link ) != 0 ) {
             echo __LINE__ . ' ' . mysqli_error($link);
             exit();
         } 
         
-        if( ! $result instanceof mysqli_result )
-        {
+        if( ! $result instanceof mysqli_result ) {
             echo __LINE__ . ' ' . mysqli_error($link);
             exit();
         }
@@ -107,7 +67,51 @@
         return $n;
     }
     
+    ###############################################################################################################################################################################
+    #   Main
+    ###############################################################################################################################################################################
+    #
+    #   connect's
+    #
+    $master_link = mysqli_connect(
+        $master_link_host,
+        $master_link_user,
+        $master_link_password,
+        $master_link_db,
+        $master_link_port
+    ) or die('Master connection fails.');
     
+    $slave_links = [];
+    foreach( $slave_config as $k => $slave_config1 ){
+        $slave_links[$k] = mysqli_connect(
+            $slave_config1['host'],
+            $slave_config1['user'],
+            $slave_config1['password'],
+            $slave_config1['db'],
+            $slave_config1['port']
+        ) or die("Slave #{$k} connection fails.");
+    }
+    
+    
+    #
+    #   create dummy table, for artificial master_log incrementation (it needs to change due to chunk locking process; without it i can't guarantee integrity on chunk checksum checking)
+    #
+    $query = "DROP TABLE IF EXISTS $dummyTableName;";
+    $result = mysqli_query($master_link, $query);
+    if( mysqli_errno( $master_link ) != 0 )
+    {
+        echo __LINE__ . ' ' . mysqli_error($master_link);
+        exit();
+    }   
+    
+    $query = "CREATE TABLE $dummyTableName ( n BIGINT ) SELECT 0 AS n;";
+    $result = mysqli_query($master_link, $query);
+    if( mysqli_errno( $master_link ) != 0 )
+    {
+        echo __LINE__ . ' ' . mysqli_error($master_link);
+        exit();
+    }   
+
     #
     #   group_concat_max_len needs to be at least $chunk_size*32 (length of md5 sum)
     #   on each server
@@ -135,27 +139,13 @@
     #
     #   get ALL tables from selected schema with information about PRI/UNI column_names
     #
-    $query = "
-        SELECT 
-            T.TABLE_NAME,
-            C.COLUMN_NAMES
-        FROM 
-            information_schema.TABLES T 
-            LEFT JOIN (
-                SELECT 
-                    C.TABLE_NAME,
-                    GROUP_CONCAT(C.COLUMN_NAME) AS COLUMN_NAMES
-                FROM 
-                    information_schema.COLUMNS C 
-                WHERE 
-                    C.TABLE_SCHEMA = '".mysqli_real_escape_string( $master_link, $master_link_db )."' 
-                GROUP BY 
-                    C.TABLE_NAME
-            ) C ON C.TABLE_NAME = T.TABLE_NAME
-        WHERE 
-            T.TABLE_SCHEMA = '".mysqli_real_escape_string( $master_link, $master_link_db )."' 	
-            AND T.TABLE_TYPE = 'base table'        
-    ";
+    $query = sprintf(
+        "select t.table_name, c.column_names from information_schema.tables t left join (select c.table_name, group_concat(c.column_name) as column_names from information_schema.columns c where c.table_schema =",
+        "'", mysqli_real_escape_string( $master_link, $master_link_db ), "' ",
+        "group by c.table_name ) c on c.table_name = t.table_name where t.table_schema =", 
+        "'", mysqli_real_escape_string( $master_link, $master_link_db ), "' ", 
+        "and t.table_type = 'base table'"
+    );
     $result = mysqli_query($master_link, $query);
     
     if( ! $result instanceof mysqli_result )
@@ -706,7 +696,7 @@
     #
     #   clean-up
     #
-    $query = "DROP TABLE __integrity_check_dummy__;";
+    $query = "DROP TABLE $dummyTableName;";
     $result = mysqli_query($master_link, $query);
     if( mysqli_errno( $master_link ) != 0 )
     {
